@@ -1,0 +1,76 @@
+import pandas as pd
+import re
+from pathlib import Path
+
+# Caminhos de entrada e saída
+in_path = Path("c:/Users/User/OneDrive/Área de Trabalho/Carlos/Projetosjd/Rel_Ope_202508_normalizada.csv")
+out_path = Path("c:/Users/User/OneDrive/Área de Trabalho/Carlos/Projetosjd/eventos_pivotados.csv")
+
+# 1) Leitura do CSV (tentando encodings diferentes)
+encodings_to_try = ["utf-8", "latin1"]
+df = None
+for enc in encodings_to_try:
+    try:
+        df = pd.read_csv(in_path, sep=None, engine="python", encoding=enc, dtype=str)
+        break
+    except Exception:
+        pass
+
+# 2) Ajuste das colunas (esperamos 2 colunas: caseid + eventos)
+cols = list(df.columns)
+if len(cols) == 1:
+    # Se vier tudo em uma coluna, tenta separar por número inicial + resto
+    single = df.iloc[:, 0].astype(str)
+    id_text = single.str.extract(r'^\s*([0-9]+)\s+(.*)$')
+    df = pd.DataFrame({"caseid": id_text[0], "eventos": id_text[1]})
+elif len(cols) >= 2:
+    df = df.astype(str)
+    df = pd.DataFrame({
+        "caseid": df.iloc[:, 0],
+        "eventos": df.iloc[:, 1:].agg(" ".join, axis=1)
+    })
+
+# 3) Quebra os eventos (separador " | ")
+def split_events(s):
+    if not isinstance(s, str):
+        s = "" if pd.isna(s) else str(s)
+    s = s.strip().strip("|").strip()
+    if not s:
+        return []
+    parts = re.split(r"\s*\|\s*", s)
+    return [p.strip() for p in parts if p.strip()]
+
+df["evento_token"] = df["eventos"].apply(split_events)
+df_expl = df.explode("evento_token", ignore_index=True)
+
+# 4) Extrai data e descrição do evento
+pattern = re.compile(r"^\s*(\d{1,2}/\d{1,2}/\d{4}\s+\d{2}:\d{2}:\d{2})\s*-\s*(.*)\s*$")
+extracted = df_expl["evento_token"].str.extract(pattern)
+df_expl["data_raw"] = extracted[0]
+df_expl["evento"] = extracted[1]
+
+# Remove linhas inválidas
+df_expl = df_expl[df_expl["data_raw"].notna() & df_expl["evento"].notna()].copy()
+
+# 5) Converte para datetime e depois formata para padrão brasileiro
+df_expl["data_dt"] = pd.to_datetime(df_expl["data_raw"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+mask_na = df_expl["data_dt"].isna()
+if mask_na.any():
+    df_expl.loc[mask_na, "data_dt"] = pd.to_datetime(
+        df_expl.loc[mask_na, "data_raw"], dayfirst=True, errors="coerce"
+    )
+
+df_expl = df_expl[df_expl["data_dt"].notna()].copy()
+
+# 6) Ordena dentro de cada caseid
+df_expl.sort_values(by=["caseid", "data_dt"], inplace=True)
+
+# 7) Cria dataframe final com data formatada
+df_final = pd.DataFrame({
+    "caseid": df_expl["caseid"].astype(str),
+    "data": df_expl["data_dt"].dt.strftime("%d/%m/%Y %H:%M:%S"),
+    "evento": df_expl["evento"].astype(str).str.strip()
+}).reset_index(drop=True)
+
+# 8) Salva no CSV
+df_final.to_csv(out_path, index=False, encoding="utf-8-sig")
